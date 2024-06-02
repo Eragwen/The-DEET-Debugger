@@ -1,129 +1,253 @@
-use rustyline::Editor;
+use crate::debugger_command::DebuggerCommand;
 use crate::inferior::Inferior;
-use std::collections::HashMap;
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
+
 
 pub struct Debugger {
-    program: String,
-    breakpoints: HashMap<usize, bool>,
+    target: String,
+    history_path: String,
+    readline: Editor<()>,
+    inferior: Option<Inferior>,
+    dwarf_data: DwarfData
+    breakpoints: Vec<usize>,
 }
 
-
 impl Debugger {
-    pub fn new(program: String) -> Debugger {
+    /// Initializes the debugger.
+    pub fn new(target: &str) -> Debugger {
+        // (milestone 3): initialize the DwarfData
+        let dwarf_data = match DwarfData::from_file(target) {
+            Ok(dwarf_data) => dwarf_data,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Error opening the file: {} ", target)
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Error parsing the file: {}", err);
+                std::process::exit(1);
+            }
+        };
+
+        let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
+        let mut readline = Editor::<()>::new();
+        // Attempt to load history from ~/.deet_history if it exists
+        let _ = readline.load_history(&history_path);
+
         Debugger {
-            program,
-            breakpoints: HashMap::new(),
+            target: target.to_string(),
+            history_path,
+            readline,
+            inferior: None,
+            dwarf_data,
+            breakpoints: Vec::new(),
         }
     }
 
     pub fn run(&mut self) {
-        let mut rl = Editor::<()>::new().expect("Error creating line editor");
-        let mut inferior = None;
-
         loop {
-            let readline = rl.readline("(deet) ");
-            match readline {
-                Ok(line) => {
-                    let args: Vec<&str> = line.split_whitespace().collect();
-                    match args.get(0).map(|s| *s) {
-                        Some("run" | "r") => {
-                            if inferior.is_some() {
-                                println!("Program already running.");
-                            } else {
-                                match Inferior::new(&self.program) {
-                                    Ok(mut child) => {
-                                        if !self.breakpoints.is_empty() {
-                                            for &addr in self.breakpoints.keys() {
-                                                child.set_breakpoint(addr).expect("Failed to set breakpoint");
-                                            }
-                                        }
-                                        inferior = Some(child);
-                                        if let Some(child) = &mut inferior {
-                                            if let Err(e) = child.cont() {
-                                                println!("Error continuing inferior: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => println!("Error starting inferior: {}", e),
-                                }
-                            }
+            match self.get_next_command() {
+                DebuggerCommand::Run(args) => {
+                    // If we're already debugging a process, kill it before starting a new one
+                    if let Some(mut inferior) = self.inferior.take() {
+                        inferior.kill().unwrap();
+                    }
+
+                    // Start a new inferior process
+                    match Inferior::new(&self.target, &args, &self.breakpoints) {
+                        Some(inferior) => {
+                            self.inferior = Some(inferior);
+                            println!("Started inferior with pid {}", self.inferior.as_ref().unwrap().pid());
                         }
-                        Some("continue" | "c") => {
-                            if let Some(child) = &mut inferior {
-                                if let Err(e) = child.cont() {
-                                    println!("Error continuing inferior: {}", e);
-                                }
-                            } else {
-                                println!("No program running.");
-                            }
+                        None => {
+                            println!("Failed to start inferior process");
                         }
-                        Some("break" | "b") => {
-                            if args.len() < 2 {
-                                println!("Usage: break <address>");
-                            } else {
-                                let addr = usize::from_str_radix(args[1], 16).expect("Invalid address");
-                                if self.breakpoints.insert(addr, true).is_none() {
-                                    println!("Breakpoint set at address {:#x}", addr);
-                                    if let Some(child) = &mut inferior {
-                                        if let Err(e) = child.set_breakpoint(addr) {
-                                            println!("Error setting breakpoint: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    println!("Breakpoint already set at address {:#x}", addr);
-                                }
-                            }   
-                        }
-                        Some("delete" | "del") => {
-                            if args.len() < 2 {
-                                println!("Usage: delete <address>");
-                            } else {
-                                let addr = usize::from_str_radix(args[1], 16).expect("Invalid address");
-                                if self.breakpoints.remove(&addr).is_some() {
-                                    println!("Breakpoint removed at address {:#x}", addr);
-                                } else {
-                                    println!("No breakpoint found at address {:#x}", addr);
-                                }
-                            }
-                        }
-                        Some("list" | "l") => {
-                            if self.breakpoints.is_empty() {
-                                println!("No breakpoints set.");
-                            } else {
-                                for &addr in self.breakpoints.keys() {
-                                    println!("Breakpoint at address {:#x}", addr);
-                                }
-                            }
-                        }
-                        Some("quit" | "q") => {
-                            if let Some(child) = &mut inferior {
-                                if let Err(e) = child.kill() {
-                                    println!("Error killing inferior: {}", e);
-                                }
-                            }
-                            break;
-                        }
-                        Some("backtrace" | "bt") => {
-                            if let Some(child) = &mut inferior {
-                                child.backtrace();
-                            } else {
-                                println!("No program running.");
-                            }
-                        }
-                        Some("help") => {
-                            println!("Available commands:");
-                            println!("run | r               - Start the program");
-                            println!("continue | c              - Continue execution");
-                            println!("break <address> | b       - Set a breakpoint at address");
-                            println!("delete <address> | del    - Delete breakpoint at address");
-                            println!("list | l                  - List all breakpoints");
-                            println!("quit | q                  - Quit the debugger");
-                            println!("help                 - Show this help message");
-                        }
-                        _ => println!("Unrecognized command. Type 'help' for a list of commands."),
                     }
                 }
-                Err(_) => break,
+
+                    
+                }
+                DebuggerCommand::Quit => {
+                    if let Some(mut inferior) = self.inferior.take() {
+                        if let Err(err) = inferior.kill() {
+                            println!("Error killing inferior process: {}", err);
+                        }
+                    }
+                    break;
+                }
+
+                DebuggerCommand::Continue => {
+                    if let Some(ref mut inferior) = self.inferior {
+                        match inferior.continue_execution() {
+                            Ok(status) => {
+                                match status {
+                                    Status::Exited(code) => {
+                                        println!("Inferior exited with code {}", code);
+                                        self.inferior = None;
+                                    }
+                                    Status::Signaled(signal) => {
+                                        println!("Inferior received signal {}", signal);
+                                    }
+                                    Status::Stopped(signal, rip) => {
+                                        println!("Inferior stopped with signal {} at address {:#x}", signal, rip);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                println!("Error continuing inferior process: {}", err);
+                            }
+                        }
+                    } else {
+                        println!("No inferior process to continue");
+                    }
+                }
+
+                DebuggerCommand::Backtrace => {
+                    if let Some(ref inferior) = self.inferior {
+                        self.backtrace();
+                    } else {
+                        println!("No inferior process to get backtrace from");
+                    }
+                }
+
+                DebuggerCommand::Breakpoint(addr) => {
+                    self.set_breakpoint(addr);
+                }
+            }
+        }
+    }
+
+    pub fn backtrace(&self) {
+        // Read registers from the inferior process
+        let pid = self.inferior.as_ref().unwrap().pid();
+        let regs = ptrace::getregs(pid).unwrap();
+
+        // Print the backtrace
+        let mut ip: usize = regs.rip.try_into().unwrap();
+        let mut bp: usize = regs.rbp.try_into().unwrap();
+        let mut stack_idx = 0;
+        loop {
+            // Read the return address from the stack
+            let ret_addr = self.inferior.as_ref().unwrap().read_memory((bp + 8) as *const libc::c_void, 8).unwrap();
+            let ret_addr = LittleEndian::read_u64(&ret_addr);
+            let func_name = self.dwarf_data.get_function_name(ip).unwrap_or("???".to_string());
+            println!("{}: {:#x} - {}", stack_idx, ip, func_name);
+
+            // Check if we've reached the end of the backtrace
+            if ret_addr == 0 {
+                break;
+            }
+
+            // Update the stack index, instruction pointer, and base pointer
+            stack_idx += 1;
+            ip = ret_addr as usize;
+            bp = self.inferior.as_ref().unwrap().read_memory((bp) as *const libc::c_void, 8).unwrap();
+            bp = LittleEndian::read_u64(&bp);
+        }
+
+    }
+
+    pub fn set_breakpoint(&mut self, input: &str) {
+        let bp: usize
+        if inp.starts_with("*") {
+            breakpoint = match Debugger::parse_address(&input[1..]) {
+                Some(addr) => addr,
+                None => {
+                    println!("ERROR: {} is not a well-formed address.", &inp[1..]);
+                    return;
+                },
+            };
+        } else {
+            bp = match input.parse::<usize>().ok() {
+                Some(line) => {
+                    match self.dwarf_data.get_addr_for_line(None, line) {
+                        Some(addr) => addr,
+                        None => {
+                            println!("ERROR: No address found for line {}.", line);
+                            return;
+                        }
+                    }
+                },
+                None => {
+                    match self.dwarf_data.get_addr_for_function(None, input) {
+                        Some(addr) => addr,
+                        None => {
+                            println!("ERROR: No address found for function {}.", input);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if the breakpoint already exists
+        if self.breakpoints.contains(&bp) {
+            println!("Breakpoint already exists at address: {:#x}", bp);
+            return;
+        }
+
+        // if not, add the breakpoint
+        println!("Set breakpoint at address: {:#x}", self.breakpoints.len(), bp);
+
+        // If child has not started, add the breakpoint to the list, child will set it when it starts
+        // If child has started, set the breakpoint in the child by calling set_breakpoint  and add it to the list
+        if let Some(inferior) = self.inferior.as_mut() {
+            let bpt = vec![bp];
+            if let Err(err) = inferior.set_breakpoints(bpt) {
+                println!("Error setting breakpoint: {}", err);
+                return;
+            }
+
+            self.breakpoints.push(bp);}
+     }
+
+
+    pub fn parse_address(addr: &str) -> Option<usize> {
+        if addr.starts_with("0x") {
+            usize::from_str_radix(&addr[2..], 16).ok()
+        } else {
+            &addr.parse::<usize>().ok()
+        }
+    }
+
+    /// This function prompts the user to enter a command, and continues re-prompting until the user
+    /// enters a valid command. It uses DebuggerCommand::from_tokens to do the command parsing.
+    ///
+    /// You don't need to read, understand, or modify this function.
+    fn get_next_command(&mut self) -> DebuggerCommand {
+        loop {
+            // Print prompt and get next line of user input
+            match self.readline.readline("(deet) ") {
+                Err(ReadlineError::Interrupted) => {
+                    // User pressed ctrl+c. We're going to ignore it
+                    println!("Type \"quit\" to exit");
+                }
+                Err(ReadlineError::Eof) => {
+                    // User pressed ctrl+d, which is the equivalent of "quit" for our purposes
+                    return DebuggerCommand::Quit;
+                }
+                Err(err) => {
+                    panic!("Unexpected I/O error: {:?}", err);
+                }
+                Ok(line) => {
+                    if line.trim().len() == 0 {
+                        continue;
+                    }
+                    self.readline.add_history_entry(line.as_str());
+                    if let Err(err) = self.readline.save_history(&self.history_path) {
+                        println!(
+                            "Warning: failed to save history file at {}: {}",
+                            self.history_path, err
+                        );
+                    }
+                    let tokens: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(cmd) = DebuggerCommand::from_tokens(&tokens) {
+                        return cmd;
+                    } else {
+                        println!("Unrecognized command.");
+                    }
+                }
             }
         }
     }

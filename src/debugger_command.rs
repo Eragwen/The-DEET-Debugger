@@ -3,7 +3,7 @@ pub enum DebuggerCommand {
     Run(Vec<String>),
     Continue,
     Backtrace,
-    Break(String),
+    Breakpoint(usize),
 }
 
 impl DebuggerCommand {
@@ -16,9 +16,16 @@ impl DebuggerCommand {
                     args.iter().map(|s| s.to_string()).collect(),
                 ))
             },
-            "c" | "cont" | "continue" => Some(DebuggerCommand::Continue),
-            "bt" | "back" | "backtrace" => Some(DebuggerCommand::Backtrace),
-            "b" | "break" => Some(DebuggerCommand::Break(String::from(tokens[1]))),
+            "c" | "continue" => Some(DebuggerCommand::Continue),
+            "bt" | "backtrace" => Some(DebuggerCommand::Backtrace),
+            "b" | "break" => {
+                if tokens.len() != 2 {
+                    println!("Usage: b <address>");
+                    return None;
+                }
+                let addr = usize::from_str_radix(tokens[1], 16).unwrap();
+                Some(DebuggerCommand::Breakpoint(addr))
+            },
             // Default case:
             _ => None,
         }
