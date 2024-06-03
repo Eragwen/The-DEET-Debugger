@@ -1,0 +1,13 @@
+- [package]
+- name = "deet"
+- version = "0.1.0"
+- authors = ["BESNARD Gwendal", "LONCARIC Leon"]
+- edition = "2024"
+- [dependencies]
+- nix = "0.17.0"
+- libc = "0.2.68"
+- rustyline = "10.0.0"
+- gimli = { git = "https://github.com/gimli-rs/gimli", rev="ad24cdb2", default-features = false, features = ["read"] }
+- object = { version = "0.17", default-features = false, features = ["read"] }
+- memmap = "0.7"
+- addr2line = "0.11.0"
